@@ -434,22 +434,21 @@ def recommend_w2v_api():
     if not days or not isinstance(days, list) or len(days) == 0:
         return jsonify({"error": "Cần chọn ngày (days)!"}), 400
 
+    # Chuẩn hóa province trước khi truyền vào các hàm xử lý
+    province_norm = normalize_province(province) if province else None
+
     # Use new multi-intent recommender
-    results_by_intent = recommend_w2v_multi_list(user_keywords, province=province, top_k=top_k)
+    results_by_intent = recommend_w2v_multi_list(user_keywords, province=province_norm, top_k=top_k)
 
     # Lấy thông tin thời tiết cho từng ngày (nếu có province)
     weather_forecast = None
-    if province:
+    if province_norm:
         # Xác định danh sách ngày
-        if days and isinstance(days, list) and len(days) > 0:
-            date_list = days
-        else:
-            today = datetime.now()
-            date_list = [(today + timedelta(days=i)).strftime("%d/%m/%Y") for i in range(3)]
+        date_list = days
         weather_forecast = []
         for date_str in date_list:
-            status = get_weather_status_with_date(province, date_str)
-            message = weather_vi_message(province, status, date_str)
+            status = get_weather_status_with_date(province_norm, date_str)
+            message = weather_vi_message(province_norm, status, date_str)
             weather_forecast.append({
                 "date": date_str,
                 "status": status,
@@ -458,7 +457,7 @@ def recommend_w2v_api():
 
     # Backward compatibility: if no intent detected, fallback to old recommend_w2v
     if not results_by_intent:
-        df_all = recommend_w2v(user_keywords, province=province, top_k=top_k, date_str=None)
+        df_all = recommend_w2v(user_keywords, province=province_norm, top_k=top_k, date_str=None)
         results = df_all.to_dict(orient="records")
         return jsonify({
             "results": results,
