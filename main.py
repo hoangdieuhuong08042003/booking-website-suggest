@@ -3,7 +3,6 @@ import numpy as np
 from flask import Flask, request, jsonify
 from gensim.models import Word2Vec
 from sklearn.metrics.pairwise import cosine_similarity
-import ast
 import re
 import requests
 import random
@@ -32,27 +31,20 @@ def normalize_province(province):
     if not province:
         return ""
     text = str(province).lower()
-    # Loại bỏ các tiền tố phổ biến
     text = re.sub(r'^(thành phố|tp\.?|tỉnh|quận|huyện|thị xã)\s*', '', text)
-    # Loại bỏ ký tự đặc biệt, dấu chấm, dấu phẩy, vv
     text = re.sub(r'[^a-zA-ZÀ-ỹ0-9\s]', '', text)
-    # Loại bỏ khoảng trắng thừa
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
 # =========================
 # INTENT SPLITTING
 # =========================
 def split_keywords_by_intent(user_keywords):
     intents = {}
-    for name, kws in THEME_GROUPS.items():
-        matched = [k for k in user_keywords if k in kws]
-        if matched:
-            intents[name] = matched
-    for name, kws in ACTIVITY_GROUPS.items():
-        matched = [k for k in user_keywords if k in kws]
-        if matched:
-            intents[name] = matched
+    for group in (THEME_GROUPS, ACTIVITY_GROUPS):
+        for name, kws in group.items():
+            matched = [k for k in user_keywords if k in kws]
+            if matched:
+                intents[name] = matched
     return intents
 
 # =========================
@@ -69,9 +61,7 @@ def recommend_single_intent(data, keywords, top_k=10):
     )[0]
     result = data.copy()
     result["similarity"] = sims
-    return result.sort_values(
-        "similarity", ascending=False
-    ).head(top_k)[
+    return result.nlargest(top_k, "similarity")[
         ["name", "province", "activities", "similarity", "description", "image", "rating"]
     ]
 
@@ -101,21 +91,7 @@ def recommend_w2v_multi_list(user_keywords, province=None, top_k=10):
 OPENWEATHER_API_KEY = "cfdf512182b6e4a04dd23de34d184235"
 
 def get_weather_status(province):
-    province_norm = normalize_province(province)
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={province_norm},VN&appid={OPENWEATHER_API_KEY}&lang=vi"
-    try:
-        response = requests.get(url)
-        data = response.json()
-        # Kiểm tra nếu có mưa
-        if "rain" in data.get("weather", [{}])[0].get("main", "").lower() or "rain" in data:
-            return "rain"
-        # Nếu có weather và main là Rain
-        if any(w.get("main", "").lower() == "rain" for w in data.get("weather", [])):
-            return "rain"
-        return "clear"
-    except Exception:
-        # Nếu lỗi, mặc định là không mưa
-        return "clear"
+    return get_weather_status_with_date(province)
 
 def get_weather_status_with_date(province, date_str=None):
     province_norm = normalize_province(province)
@@ -123,9 +99,10 @@ def get_weather_status_with_date(province, date_str=None):
     try:
         response = requests.get(url)
         data = response.json()
-        if "rain" in data.get("weather", [{}])[0].get("main", "").lower() or "rain" in data:
+        weather = data.get("weather", [{}])
+        if weather and ("rain" in weather[0].get("main", "").lower() or "rain" in data):
             return "rain"
-        if any(w.get("main", "").lower() == "rain" for w in data.get("weather", [])):
+        if any(w.get("main", "").lower() == "rain" for w in weather):
             return "rain"
         return "clear"
     except Exception:
@@ -133,16 +110,14 @@ def get_weather_status_with_date(province, date_str=None):
 
 def normalize_text(text):
     return re.sub(r'[^a-zA-ZÀ-ỹ0-9\s]', '', str(text).lower()).strip()
+
 def tokenize_text(text):
     text = text.lower()
     text = re.sub(r'[^a-zA-ZÀ-ỹ0-9\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text.split()
+    return re.sub(r'\s+', ' ', text).strip().split()
+
 def w2v_embedding(tokens, model):
-    vectors = []
-    for t in tokens:
-        if t in model.wv:
-            vectors.append(model.wv[t])
+    vectors = [model.wv[t] for t in tokens if t in model.wv]
     return np.mean(vectors, axis=0) if vectors else np.zeros(model.vector_size)
 
 
@@ -280,15 +255,7 @@ def recommend_w2v(user_keywords, province=None, top_k=20, date_str=None):
 # =========================
 # PRE-COMPUTE 
 # =========================
-def w2v_embedding(tokens, model):
-    vectors = []
-    for t in tokens:
-        if t in model.wv:
-            vectors.append(model.wv[t])
-    return np.mean(vectors, axis=0) if vectors else np.zeros(model.vector_size)
-df["w2v_embedding"] = df["w2v_tokens"].apply(
-    lambda x: w2v_embedding(x, w2v_model)
-)
+df["w2v_embedding"] = df["w2v_tokens"].apply(lambda x: w2v_embedding(x, w2v_model))
 
 # =========================
 # RECOMMEND FUNCTION
@@ -462,6 +429,10 @@ def recommend_w2v_api():
     province = data.get("province")  # optional
     top_k = data.get("top_k", 20)
     days = data.get("days")  # list các ngày dạng 'dd/mm/yyyy', optional
+
+    # Bắt buộc phải truyền ngày
+    if not days or not isinstance(days, list) or len(days) == 0:
+        return jsonify({"error": "Cần chọn ngày (days)!"}), 400
 
     # Use new multi-intent recommender
     results_by_intent = recommend_w2v_multi_list(user_keywords, province=province, top_k=top_k)
@@ -720,6 +691,10 @@ def itinerary_w2v_api():
     province = data.get("province")
     days = data.get("days")
     top_k = int(data.get("top_k", 40)) if "top_k" in data else 40
+
+    # Bắt buộc phải truyền ngày
+    if not days or not isinstance(days, list) or len(days) == 0:
+        return jsonify({"error": "Cần chọn ngày (days)!"}), 400
 
     daily_results = build_daily_itinerary(user_keywords, province, days, top_k=top_k)
     return jsonify({
