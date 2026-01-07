@@ -27,6 +27,18 @@ ACTIVITY_GROUPS = {
     "trekking": ["trekking", "leo núi", "camping", "picnic"],
     "shopping": ["mua sắm", "shopping", "chợ"]
 }
+def normalize_province(province):
+    """Chuẩn hóa tên tỉnh/thành phố về dạng chữ thường, loại bỏ ký tự đặc biệt, tiền tố và khoảng trắng thừa."""
+    if not province:
+        return ""
+    text = str(province).lower()
+    # Loại bỏ các tiền tố phổ biến
+    text = re.sub(r'^(thành phố|tp\.?|tỉnh|quận|huyện|thị xã)\s*', '', text)
+    # Loại bỏ ký tự đặc biệt, dấu chấm, dấu phẩy, vv
+    text = re.sub(r'[^a-zA-ZÀ-ỹ0-9\s]', '', text)
+    # Loại bỏ khoảng trắng thừa
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 # =========================
 # INTENT SPLITTING
@@ -68,9 +80,10 @@ def recommend_single_intent(data, keywords, top_k=10):
 # =========================
 def recommend_w2v_multi_list(user_keywords, province=None, top_k=10):
     intents = split_keywords_by_intent(user_keywords)
-    if province:
+    province_norm = normalize_province(province) if province else None
+    if province_norm:
         data = df[
-            df["province"].fillna("").str.lower() == province.lower()
+            df["province"].fillna("").str.lower() == province_norm
         ].copy()
     else:
         data = df.copy()
@@ -88,8 +101,8 @@ def recommend_w2v_multi_list(user_keywords, province=None, top_k=10):
 OPENWEATHER_API_KEY = "cfdf512182b6e4a04dd23de34d184235"
 
 def get_weather_status(province):
-    # Sử dụng tên tỉnh để lấy thời tiết hiện tại từ OpenWeatherMap
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={province},VN&appid={OPENWEATHER_API_KEY}&lang=vi"
+    province_norm = normalize_province(province)
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={province_norm},VN&appid={OPENWEATHER_API_KEY}&lang=vi"
     try:
         response = requests.get(url)
         data = response.json()
@@ -105,10 +118,8 @@ def get_weather_status(province):
         return "clear"
 
 def get_weather_status_with_date(province, date_str=None):
-    """Lấy trạng thái thời tiết cho một ngày cụ thể (nếu API hỗ trợ). Nếu không, trả về hiện tại."""
-    # Nếu muốn lấy dự báo, dùng API forecast (ở đây chỉ lấy hiện tại vì API free không hỗ trợ forecast chính xác cho từng ngày)
-    # Nếu có date_str, trả về ngày đó, còn không thì trả về hiện tại
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={province},VN&appid={OPENWEATHER_API_KEY}&lang=vi"
+    province_norm = normalize_province(province)
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={province_norm},VN&appid={OPENWEATHER_API_KEY}&lang=vi"
     try:
         response = requests.get(url)
         data = response.json()
@@ -161,6 +172,12 @@ def recommend_w2v2(user_keywords, province=None, top_k=20, days=None):
     user_tokens = tokenize_text(" ".join(user_keywords))
     user_emb = w2v_embedding(user_tokens, w2v_model)
 
+    province_norm = normalize_province(province) if province else None
+    if province_norm:
+        data = df[df["province"].str.lower() == province_norm].copy()
+    else:
+        data = df.copy()
+
     # 1️⃣ Filter theo province (nếu có)
     if province:
         data = df[df["province"].str.lower() == province.lower()].copy()
@@ -207,6 +224,12 @@ def recommend_w2v2(user_keywords, province=None, top_k=20, days=None):
 def recommend_w2v(user_keywords, province=None, top_k=20, date_str=None):
     user_tokens = tokenize_text(" ".join(user_keywords))
     user_emb = w2v_embedding(user_tokens, w2v_model)
+
+    province_norm = normalize_province(province) if province else None
+    if province_norm:
+        data = df[df["province"].str.lower() == province_norm].copy()
+    else:
+        data = df.copy()
 
     # 1️⃣ Filter theo province (nếu có)
     if province:
@@ -521,13 +544,13 @@ def recommend_w2v_test():
 
 # Helper function to build daily itinerary results
 def build_daily_itinerary(user_keywords, province, days, top_k=20):
-    # Use multi-intent recommender
-    results_by_intent = recommend_w2v_multi_list(user_keywords, province=province, top_k=top_k)
+    province_norm = normalize_province(province) if province else None
+    results_by_intent = recommend_w2v_multi_list(user_keywords, province=province_norm, top_k=top_k)
     # Fallback: if no intent, use old method
     if not results_by_intent:
         date_str = days[0] if days and isinstance(days, list) and len(days) > 0 else None
-        result_df = recommend_w2v(user_keywords, province=province, top_k=top_k, date_str=date_str)
-        itinerary = generate_itinerary(result_df, user_keywords, province, days)
+        result_df = recommend_w2v(user_keywords, province=province_norm, top_k=top_k, date_str=date_str)
+        itinerary = generate_itinerary(result_df, user_keywords, province_norm, days)
         days_list = days if days and isinstance(days, list) and len(days) > 0 else [
             (datetime.now() + timedelta(days=i)).strftime("%d/%m/%Y") for i in range(len(itinerary))
         ]
@@ -555,9 +578,9 @@ def build_daily_itinerary(user_keywords, province, days, top_k=20):
     lunch_keywords = ['ẩm thực', 'ăn uống', 'nhà hàng']
     evening_keywords = ['quán cà phê', 'chụp ảnh']
     dinner_keywords = ['ẩm thực', 'ăn uống', 'nhà hàng']
-    lunch_places = recommend_w2v2(lunch_keywords, province=province, top_k=top_k).reset_index(drop=True)
-    evening_places = recommend_w2v2(evening_keywords, province=province, top_k=top_k).reset_index(drop=True)
-    dinner_places = recommend_w2v2(dinner_keywords, province=province, top_k=top_k).reset_index(drop=True)
+    lunch_places = recommend_w2v2(lunch_keywords, province=province_norm, top_k=top_k).reset_index(drop=True)
+    evening_places = recommend_w2v2(evening_keywords, province=province_norm, top_k=top_k).reset_index(drop=True)
+    dinner_places = recommend_w2v2(dinner_keywords, province=province_norm, top_k=top_k).reset_index(drop=True)
     used_lunch = set()
     used_evening = set()
     used_dinner = set()
@@ -571,8 +594,8 @@ def build_daily_itinerary(user_keywords, province, days, top_k=20):
     itinerary = []
     for day_idx, date_str in enumerate(days_list):
         day_plan = {}
-        weather_status = get_weather_status_with_date(province, date_str)
-        weather_message = weather_vi_message(province, weather_status, date_str)
+        weather_status = get_weather_status_with_date(province_norm, date_str)
+        weather_message = weather_vi_message(province_norm, weather_status, date_str)
         day_plan['thời tiết'] = weather_message
         weather_forecast = weather_message
 
@@ -725,3 +748,4 @@ def itinerary_w2v_test():
 # =========================
 if __name__ == "__main__":
     app.run(debug=True)
+
