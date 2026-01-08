@@ -7,6 +7,9 @@ import re
 import requests
 import random
 from datetime import datetime, timedelta
+import os
+import pickle
+
 # =========================
 # INTENT GROUPS
 # =========================
@@ -86,27 +89,34 @@ def recommend_w2v_multi_list(user_keywords, province=None, top_k=10):
             results[intent] = rec.to_dict(orient="records")
     return results
 # =========================
-# WEATHER API
+# WEATHER API (THÊM CACHE ĐƠN GIẢN TRONG 1 REQUEST)
 # =========================
 OPENWEATHER_API_KEY = "cfdf512182b6e4a04dd23de34d184235"
+_weather_cache = {}
 
 def get_weather_status(province):
     return get_weather_status_with_date(province)
 
 def get_weather_status_with_date(province, date_str=None):
+    key = (province, date_str)
+    if key in _weather_cache:
+        return _weather_cache[key]
     province_norm = normalize_province(province)
     url = f"https://api.openweathermap.org/data/2.5/weather?q={province_norm},VN&appid={OPENWEATHER_API_KEY}&lang=vi"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=3)
         data = response.json()
         weather = data.get("weather", [{}])
         if weather and ("rain" in weather[0].get("main", "").lower() or "rain" in data):
-            return "rain"
-        if any(w.get("main", "").lower() == "rain" for w in weather):
-            return "rain"
-        return "clear"
+            status = "rain"
+        elif any(w.get("main", "").lower() == "rain" for w in weather):
+            status = "rain"
+        else:
+            status = "clear"
     except Exception:
-        return "clear"
+        status = "clear"
+    _weather_cache[key] = status
+    return status
 
 def normalize_text(text):
     return re.sub(r'[^a-zA-ZÀ-ỹ0-9\s]', '', str(text).lower()).strip()
@@ -122,26 +132,54 @@ def w2v_embedding(tokens, model):
 
 
 # =========================
-# LOAD DATA
+# LOAD DATA & WORD2VEC MODEL (TỐI ƯU KHỞI ĐỘNG)
 # =========================
-df = pd.read_csv("data2.csv")
+DATA_CSV = "data2.csv"
+EMBED_CSV = "data2_with_embed.csv"
+W2V_MODEL_PATH = "w2v_model.pkl"
 
-df["w2v_tokens"] = df["text_for_model"].apply(tokenize_text)
+def load_or_train_w2v(sentences):
+    if os.path.exists(W2V_MODEL_PATH):
+        with open(W2V_MODEL_PATH, "rb") as f:
+            model = pickle.load(f)
+    else:
+        model = Word2Vec(
+            sentences=sentences,
+            vector_size=50,
+            window=5,
+            min_count=1,
+            workers=1,  # giảm worker để tránh quá tải CPU trên Render
+            seed=42
+        )
+        with open(W2V_MODEL_PATH, "wb") as f:
+            pickle.dump(model, f)
+    return model
+
+def load_data_and_embeddings():
+    if os.path.exists(EMBED_CSV):
+        df = pd.read_csv(EMBED_CSV)
+        df["w2v_embedding"] = df["w2v_embedding"].apply(lambda x: np.array(eval(x)))
+        df["w2v_tokens"] = df["w2v_tokens"].apply(eval)
+    else:
+        df = pd.read_csv(DATA_CSV)
+        df["w2v_tokens"] = df["text_for_model"].apply(tokenize_text)
+        sentences = df["w2v_tokens"].tolist()
+        w2v_model = load_or_train_w2v(sentences)
+        df["w2v_embedding"] = df["w2v_tokens"].apply(lambda x: w2v_embedding(x, w2v_model))
+        # Lưu lại embedding để lần sau load nhanh
+        df_save = df.copy()
+        df_save["w2v_embedding"] = df_save["w2v_embedding"].apply(lambda x: x.tolist())
+        df_save["w2v_tokens"] = df_save["w2v_tokens"].apply(lambda x: list(x))
+        df_save.to_csv(EMBED_CSV, index=False)
+    return df
+
+# Khởi tạo dữ liệu và model chỉ 1 lần
+df = load_data_and_embeddings()
 sentences = df["w2v_tokens"].tolist()
+w2v_model = load_or_train_w2v(sentences)
 
 # =========================
-# TRAIN WORD2VEC
-# =========================
-w2v_model = Word2Vec(
-    sentences=sentences,
-    vector_size=50,
-    window=5,
-    min_count=1,
-    workers=4,
-    seed=42
-)
-# =========================
-# RECOMMEND_W2V2 FUNCTION
+# RECOMMEND_W2V2 FUNCTION (TỐI ƯU FILTER)
 # =========================
 def recommend_w2v2(user_keywords, province=None, top_k=20, days=None):
     user_tokens = tokenize_text(" ".join(user_keywords))
@@ -149,25 +187,19 @@ def recommend_w2v2(user_keywords, province=None, top_k=20, days=None):
 
     province_norm = normalize_province(province) if province else None
     if province_norm:
-        data = df[df["province"].str.lower() == province_norm].copy()
+        data = df[df["province"].str.lower() == province_norm]
     else:
-        data = df.copy()
-
-    # 1️⃣ Filter theo province (nếu có)
-    if province:
-        data = df[df["province"].str.lower() == province.lower()].copy()
-    else:
-        data = df.copy()
+        data = df
 
     if data.empty:
         return pd.DataFrame(columns=["name", "province", "activities", "similarity", "description", "image", "rating"])
 
-    # 2️⃣ Similarity
     sims = cosine_similarity(
         user_emb.reshape(1, -1),
         np.vstack(data["w2v_embedding"])
     )[0]
 
+    data = data.copy()
     data["similarity"] = sims
 
     # 3️⃣ Xử lý danh sách ngày (days) truyền vào dạng list các chuỗi ngày 'dd/mm/yyyy'
@@ -721,4 +753,8 @@ def itinerary_w2v_test():
 # RUN SERVER
 # =========================
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )
